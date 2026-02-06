@@ -35,7 +35,7 @@ copy_to_import_on() {
   # an uncompressed tarball on stdin).
   /usr/bin/time -f "copy/import($ip) took: %e s" \
     bash -c \
-      "cat ${IMG_TAR_FILE_PATH} | ssh "${username}@${ip}" \
+      "cat ${IMG_TAR_FILE_PATH} | ssh -o StrictHostKeyChecking=no "${username}@${ip}" \
         'cat | gunzip | sudo --prompt=\"\" -S -- ctr -n k8s.io images import -'" \
           2>&1 | grep -v DEPRECATION
 }
