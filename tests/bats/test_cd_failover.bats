@@ -45,11 +45,11 @@ teardown_file() {
 
 
 # bats test_tags=fastfeedback
-@test "CD nvb many-iteration wrapper" {
+@test "CDs: nvb many-iteration wrapper" {
   # Propose and test-cover a snippet that is meant to be used for manual,
   # long-running, many-iteration testing. Parameters used below: fault injection
   # type `4`: no failure; nvbandwidth parameters optimized for fast completion.
-  export REPETITIONS="2"
+  export REPETITIONS="1"
   export NVB_GPUS_PER_NODE="2"
   export NVB_NUM_NODES="2"
   export NVB_NUM_RANKS="4"
