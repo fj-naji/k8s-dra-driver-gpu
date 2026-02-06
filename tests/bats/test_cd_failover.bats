@@ -29,17 +29,17 @@ teardown_file() {
 
 
 # bats test_tags=fastfeedback
-@test "CD failover nvb: force-delete worker pod 0" {
+@test "CDs: failover nvb: force-delete worker pod 0" {
   bash tests/bats/lib/test_cd_nvb_failover.sh "$SPECPATH" 1
 }
 
 
-@test "CD failover nvb: force-delete all IMEX daemons" {
+@test "CDs: failover nvb: force-delete all IMEX daemons" {
   bash tests/bats/lib/test_cd_nvb_failover.sh "$SPECPATH" 2
 }
 
 
-@test "CD failover nvb: regular-delete worker pod 1" {
+@test "CDs: failover nvb: regular-delete worker pod 1" {
   bash tests/bats/lib/test_cd_nvb_failover.sh "$SPECPATH" 3
 }
 

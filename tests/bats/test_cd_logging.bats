@@ -32,7 +32,7 @@ setup () {
 }
 
 
-@test "CD controller: test log verbosity levels" {
+@test "CDs: controller: test log verbosity levels" {
   iupgrade_wait "${TEST_CHART_REPO}" "${TEST_CHART_VERSION}" NOARGS
 
   # Deploy workload: give the controller something to log about.
@@ -104,7 +104,7 @@ setup () {
   kubectl wait --for=delete pods imex-channel-injection --timeout=10s
 }
 
-@test "CD daemon: test log verbosity levels" {
+@test "CDs: daemon: test log verbosity levels" {
   log_objects
   iupgrade_wait "${TEST_CHART_REPO}" "${TEST_CHART_VERSION}" NOARGS
 
