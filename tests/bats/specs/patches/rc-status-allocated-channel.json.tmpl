@@ -1,0 +1,48 @@
+{
+  "status": {
+    "reservedFor": [
+      { "uid": "__POD_UID__", "name": "__POD_NAME__", "resource": "pods" }
+    ],
+    "allocation": {
+      "allocationTimestamp": "__ALLOCATION_TIMESTAMP__",
+      "nodeSelector": {
+        "nodeSelectorTerms": [
+          {
+            "matchFields": [
+              { "key": "metadata.name", "operator": "In", "values": ["__NODE_NAME__"] }
+            ]
+          }
+        ]
+      },
+      "devices": {
+        "config": [
+          {
+            "source": "FromClaim",
+            "requests": ["channel"],
+            "opaque": {
+              "driver": "__OPAQUE_DRIVER__",
+              "parameters": {
+                "kind": "__KIND__",
+                "domainID": "__DOMAIN_ID__"
+              }
+            }
+          }
+        ],
+        "results": [
+          {
+            "request": "channel",
+            "driver": "__RESULT_DRIVER__",
+            "pool": "__POOL__",
+            "device": "__DEVICE__",
+            "bindingConditions": [
+              "ComputeDomainReady"
+            ],
+            "bindingFailureConditions": [
+                "ComputeDomainNotReady"
+            ]
+          }
+        ]
+      }
+    }
+  }
+}
