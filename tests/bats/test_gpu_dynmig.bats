@@ -11,7 +11,7 @@ setup_file () {
     -n nvidia-dra-driver-gpu \
     -c gpus \
     --prefix --tail=-1
-  assert_output --partial "About to announce device gpu-2-mig-1g24gb"
+  assert_output --partial "About to announce device gpu-0-mig-1g"
 }
 
 # Executed before entering each test in this file.
@@ -78,16 +78,18 @@ confirm_mig_mode_disabled_all_nodes() {
   run kubectl logs "${_podname}" -c ctr0
   assert_output --partial "UUID: MIG-"
   assert_output --partial "UUID: GPU-"
-  assert_output --partial "MIG 1g"
   echo "${output}"
   echo "${output}" | wc -l | grep 2
+  mig1uuid="$(echo "${output}" | grep -oP 'MIG-\K[0-9a-f-]+')"
 
   run kubectl logs "${_podname}" -c ctr1
   assert_output --partial "UUID: MIG-"
   assert_output --partial "UUID: GPU-"
-  assert_output --partial "MIG 3g"
   echo "${output}"
   echo "${output}" | wc -l | grep 2
+  mig2uuid="$(echo "${output}" | grep -oP 'MIG-\K[0-9a-f-]+')"
+
+  assert_not_equal "$mig1uuid" "$mig2uuid"
 
   kubectl delete -f  "${_specpath}"
   kubectl wait --for=delete pods "${_podname}" --timeout=10s

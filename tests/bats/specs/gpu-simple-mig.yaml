@@ -13,8 +13,12 @@ spec:
           deviceClassName: mig.nvidia.com
           selectors:
           - cel:
-              # For now, rely on (G)B200
-              expression: "device.attributes['gpu.nvidia.com'].profile == '1g.24gb'"
+              # Define a lower bound of memory and compute. Deliberately do not
+              # ask for a specific profile by name.
+              expression: |
+                device.capacity['gpu.nvidia.com'].multiprocessors.isGreaterThan(quantity("10"))
+                &&
+                device.capacity['gpu.nvidia.com'].memory.isGreaterThan(quantity("10Gi"))
 ---
 apiVersion: v1
 kind: Pod

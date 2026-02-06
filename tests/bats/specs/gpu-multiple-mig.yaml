@@ -10,18 +10,20 @@ spec:
   spec:
     devices:
       requests:
-      - name: mig1g
+      - name: mig1
         exactly:
           deviceClassName: mig.nvidia.com
           selectors:
           - cel:
-              expression: "device.attributes['gpu.nvidia.com'].profile == '1g.24gb'"
-      - name: mig3g
+              expression: |
+                device.capacity['gpu.nvidia.com'].multiprocessors.isLessThan(quantity("30"))
+      - name: mig2
         exactly:
           deviceClassName: mig.nvidia.com
           selectors:
           - cel:
-              expression: "device.attributes['gpu.nvidia.com'].profile == '3g.95gb'"
+              expression: |
+                device.capacity['gpu.nvidia.com'].multiprocessors.isGreaterThan(quantity("50"))
       # test elsewhere: spawned on the same parent GPU --
       # constraints:
       # - requests: []
@@ -42,7 +44,7 @@ spec:
     resources:
       claims:
       - name: migdevs
-        request: mig1g
+        request: mig1
   - name: ctr1
     image: ubuntu:24.04
     command: ["bash", "-c"]
@@ -50,7 +52,7 @@ spec:
     resources:
       claims:
       - name: migdevs
-        request: mig3g
+        request: mig2
   resourceClaims:
   - name: migdevs
     resourceClaimTemplateName: rct-migdevs

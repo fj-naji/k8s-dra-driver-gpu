@@ -13,8 +13,8 @@ spec:
           deviceClassName: mig.nvidia.com
           selectors:
           - cel:
-              # For now, rely on (G)B200
-              expression: "device.attributes['gpu.nvidia.com'].profile == '1g.24gb'"
+              expression: |
+                device.capacity['gpu.nvidia.com'].multiprocessors.isGreaterThan(quantity("10"))
       config:
       # This doesn't do anything interesting from the user's point of view, but
       # exercises special branches in the DRA driver's prepare code path.
