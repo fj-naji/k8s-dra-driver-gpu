@@ -92,9 +92,15 @@ func (m *MigSpec) Tuple() *MigSpecTuple {
 	}
 }
 
-// Turns MigSpecTuple into a canonical MIG device name. Needs additional input:
-// The stringified MIG profile name (deliberately not stored on the type because
-// it is not a fundamental dimension; but directly implied by profile ID).
+// Turns MigSpecTuple into a canonical MIG device name. Currently, this needs
+// additional input: the MIG profile name (deliberately not stored on the type
+// because it is not a fundamental dimension; but directly implied by profile
+// ID). Note that there is no absolute standard for constructing a profile name.
+// This is currently done by go-nvlib in `func (p MigProfileInfo) String()` to
+// resemble the output of nvidia-smi. For now, the profile name (in the DRA
+// device's canonical name) is relied upon for _sorting_ devices within a
+// resource slice, and that order is relevant for the k8s scheduler which
+// iterates through devices from top to bottom and picks the first match.
 func (m *MigSpecTuple) ToCanonicalName(profileName string) DeviceName {
 	pname := toRFC1123Compliant(strings.ReplaceAll(profileName, ".", ""))
 	return fmt.Sprintf("gpu-%d-mig-%s-%d-%d", m.ParentMinor, pname, m.ProfileID, m.PlacementStart)
