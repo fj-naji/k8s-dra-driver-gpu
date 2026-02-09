@@ -159,7 +159,7 @@ func (m *ResourceClaimManager) Stop() error {
 
 func (m *ResourceClaimManager) addOrUpdate(ctx context.Context, obj any) error {
 	rc, ok := obj.(*resourcev1.ResourceClaim)
-	if !ok || rc == nil {
+	if !ok {
 		return fmt.Errorf("failed to cast object to ResourceClaim")
 	}
 
@@ -168,13 +168,22 @@ func (m *ResourceClaimManager) addOrUpdate(ctx context.Context, obj any) error {
 	}
 
 	// Check the allocationResult of ResourceClaim to determine whether it should be monitored.
-	isEligible, domainID := m.checkClaimEligibleForComputeDomainLabeling(rc)
-	if !isEligible {
+	req, err := m.getComputeDomainChannelRequestConfig(rc)
+	if err != nil {
+		return fmt.Errorf("error getting config for ComputeDomainChannel request from ResourceClaim %s/%s: %w", rc.Namespace, rc.Name, err)
+	}
+
+	if req == nil {
 		return nil
 	}
 
-	if domainID == "" {
-		return fmt.Errorf("matching ResourceClaim %s/%s has no domainID in allocation config", rc.Namespace, rc.Name)
+	// Get domain id
+	domainID := req.DomainID
+
+	//Check namespace
+	err = m.AssertComputeDomainNamespace(rc.Namespace, domainID)
+	if err != nil {
+		return fmt.Errorf("failed to assert Namespace for computeDomain with domainID %s and ResourceClaim %s/%s: %w", domainID, rc.Namespace, rc.Name, err)
 	}
 
 	currentAllocationTimestamp := ""
@@ -197,12 +206,6 @@ func (m *ResourceClaimManager) addOrUpdate(ctx context.Context, obj any) error {
 
 	// Cancel a monitor that has already timed out.
 	m.cancelTimeoutedMonitor(ctx, rc, rcMonitors, currentAllocationTimestamp)
-
-	//Check namespace
-	err = m.AssertComputeDomainNamespace(rc.Namespace, domainID)
-	if err != nil {
-		return fmt.Errorf("failed to assert Namespace for computeDomain with domainID %s and ResourceClaim %s/%s: %w", domainID, rc.Namespace, rc.Name, err)
-	}
 
 	//Check if monitoring already launched and return if yes
 	if _, loaded := rcMonitors.Load(currentAllocationTimestamp); loaded {
@@ -300,9 +303,16 @@ func (m *ResourceClaimManager) addOrUpdate(ctx context.Context, obj any) error {
 	return nil
 }
 
-// Checks if ResourceClaim is Eligible for Compute Domain Labeling and returns domainID
-func (m *ResourceClaimManager) checkClaimEligibleForComputeDomainLabeling(rc *resourcev1.ResourceClaim) (bool, string) {
-	var domainID string
+// getComputeDomainChannelRequestConfig determines if a ResourceClaim is a monitoring target by filtering
+// the allocationResult and returns the config information associated with the target allocationResult.
+//
+// The processing target must meet the following conditions:
+// - The driver is "compute-domain.nvidia.com"
+// - The device is a channel device (determined by whether its corresponding config is ComputeDomainChannelConfig)
+// - The device has BindingConditions
+// - The device is not set any BindingConditions/BindingFailureConditions
+func (m *ResourceClaimManager) getComputeDomainChannelRequestConfig(rc *resourcev1.ResourceClaim) (*nvapi.ComputeDomainChannelConfig, error) {
+	var config *nvapi.ComputeDomainChannelConfig
 
 	configs, err := GetOpaqueDeviceConfigs(
 		nvapi.StrictDecoder,
@@ -310,7 +320,7 @@ func (m *ResourceClaimManager) checkClaimEligibleForComputeDomainLabeling(rc *re
 		rc.Status.Allocation.Devices.Config,
 	)
 	if err != nil {
-		return false, ""
+		return nil, err
 	}
 
 	var configResults []*resourcev1.DeviceRequestAllocationResult
@@ -324,8 +334,8 @@ func (m *ResourceClaimManager) checkClaimEligibleForComputeDomainLabeling(rc *re
 			if slices.Contains(c.Requests, result.Request) {
 				if _, ok := c.Config.(*nvapi.ComputeDomainChannelConfig); ok {
 					configResults = append(configResults, &result)
-					if domainID == "" {
-						domainID = c.Config.(*nvapi.ComputeDomainChannelConfig).DomainID
+					if config == nil {
+						config = c.Config.(*nvapi.ComputeDomainChannelConfig)
 					}
 					break
 				}
@@ -341,19 +351,19 @@ func (m *ResourceClaimManager) checkClaimEligibleForComputeDomainLabeling(rc *re
 					for _, cond := range deviceStatus.Conditions {
 						// Check the device is not set BindingConditions
 						if cond.Type == nvapi.ComputeDomainBindingConditions && cond.Status == metav1.ConditionTrue {
-							return false, domainID
+							return nil, nil
 						}
 						// Check the device is not set BindingFailureConditions
 						if cond.Type == nvapi.ComputeDomainBindingFailureConditions && cond.Status == metav1.ConditionTrue {
-							return false, domainID
+							return nil, nil
 						}
 					}
 				}
 			}
-			return true, domainID
+			return config, nil
 		}
 	}
-	return false, domainID
+	return nil, nil
 
 }
 
@@ -418,8 +428,8 @@ func (m *ResourceClaimManager) setBindingConditions(ctx context.Context, rc *res
 		for _, allocationDevice := range rcToUpdate.Status.Allocation.Devices.Results {
 			device := &resourcev1.AllocatedDeviceStatus{
 				Driver: allocationDevice.Driver,
-				Device: allocationDevice.Device,
 				Pool:   allocationDevice.Pool,
+				Device: allocationDevice.Device,
 			}
 			rcToUpdate.Status.Devices = append(rcToUpdate.Status.Devices, *device)
 		}

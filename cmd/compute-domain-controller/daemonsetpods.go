@@ -85,17 +85,9 @@ func (m *DaemonSetPodManager) Start(ctx context.Context) (rerr error) {
 		}
 	}()
 
-	if err := addComputeDomainLabelIndexer[*corev1.Pod](m.informer); err != nil {
-		return fmt.Errorf("error adding indexer for MultiNodeEnvironment label: %w", err)
+	if err := addComputeDomainNodePodInexer(m.informer); err != nil {
+		return fmt.Errorf("error adding ComputeDomain Node indexer: %w", err)
 	}
-
-	m.mutationCache = cache.NewIntegerResourceVersionMutationCache(
-		klog.Background(),
-		m.informer.GetStore(),
-		m.informer.GetIndexer(),
-		mutationCacheTTL,
-		true,
-	)
 
 	m.waitGroup.Add(1)
 	go func() {
@@ -124,16 +116,12 @@ func (m *DaemonSetPodManager) List() ([]*corev1.Pod, error) {
 }
 
 func (m *DaemonSetPodManager) Get(ctx context.Context, cdUID string, nodeName string) (*corev1.Pod, error) {
-	pods, err := getByComputeDomainUID[*corev1.Pod](ctx, m.mutationCache, cdUID)
+	pod, err := getByComputeDomainUIDAndNode(ctx, m.informer.GetIndexer(), cdUID, nodeName)
 	if err != nil {
 		return nil, fmt.Errorf("error retrieving DaemonSetPods: %w", err)
 	}
-
-	for _, p := range pods {
-		if p.Spec.NodeName == nodeName {
-			return p, nil
-		}
+	if pod == nil {
+		return nil, fmt.Errorf("no DeamonSetPod with name %s matching DomainID %s found", nodeName, cdUID)
 	}
-
-	return nil, fmt.Errorf("no DeamonSetPod with name %s matching DomainID %s found", nodeName, cdUID)
+	return pod, nil
 }
