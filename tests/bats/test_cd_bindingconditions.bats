@@ -488,6 +488,103 @@ EOF
 
 }
 
-# 8) Failure then recovery: NotReady -> claim gets ComputeDomainNotReady=True -> Failure -> ComputeDomainReady=True -> pod scheduled.
+# 8) Failure: NotReady -> claim gets ComputeDomainNotReady=True -> RC rescheduled
+@test "compute-domain: BindingFailureCondition (cd ready -> ds image changed -> pod pending -> ComputeDomainNotReady -> RC rescheduled)" {
+  local cd_spec="tests/bats/specs/cd-bc-only.yaml"
+  local pod_spec="tests/bats/specs/cd-bc-pod-only.yaml"
+  
+  local cd_name="cd-bindingconditions-test"
+  local pod_name="cd-bindingconditions-pod"
+  local rct_name="cd-channel-0"
 
-# TODO
+  # 1) Create ComputeDomain (controller should create RCT + DaemonSet)
+  kubectl -n "${WORKLOAD_NAMESPACE}" apply -f "${cd_spec}" >/dev/null
+  retry 60 1 kubectl -n "${WORKLOAD_NAMESPACE}" get computedomains "${cd_name}" >/dev/null
+
+  local domain_id
+  domain_id="$(kubectl -n "${WORKLOAD_NAMESPACE}" get computedomains "${cd_name}" -o jsonpath='{.metadata.uid}')"
+  [[ -n "${domain_id}" ]] || fail "ComputeDomain UID(domain_id) is empty"
+
+  # 2) Wait RCT exists (created by controller)
+  retry 60 1 kubectl -n "${WORKLOAD_NAMESPACE}" get resourceclaimtemplate "${rct_name}" >/dev/null \
+    || fail "ResourceClaimTemplate ${WORKLOAD_NAMESPACE}/${rct_name} did not appear"
+
+  # 3) Find DaemonSet name for this ComputeDomain and change image to nonexisting one.
+  # Wait for DaemonSet name labeled with resource.nvidia.com/computeDomain=${domain_id}
+  local ds_name=""
+  for i in $(seq 1 60); do
+    ds_name="$(kubectl -n "${DRIVER_NAMESPACE}" get ds \
+      -l "resource.nvidia.com/computeDomain=${domain_id}" \
+      -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+    if [[ -n "${ds_name}" ]]; then
+      break
+    fi
+    sleep 1
+  done
+  [[ -n "${ds_name}" ]] || {
+    echo "ERROR: could not find DaemonSet with label resource.nvidia.com/computeDomain=${domain_id} in ns=${DRIVER_NAMESPACE}"
+    kubectl -n "${DRIVER_NAMESPACE}" get ds -o wide || true
+    kubectl -n "${DRIVER_NAMESPACE}" get ds -l "resource.nvidia.com/computeDomain=${domain_id}" -o yaml || true
+    fail "daemonset not found"
+  }
+
+  kubectl -n "${DRIVER_NAMESPACE}" patch ds "${ds_name}" \
+  --type=strategic -p '{
+    "spec": {
+      "template": {
+        "spec": {
+          "containers": [{
+            "name": "compute-domain-daemon",
+            "image": "non_existant_image"
+          }]
+        }
+      }
+    }
+  }' >/dev/null
+  sleep 2
+
+  # 4) Create workload pod (it references the RCT)
+  kubectl -n "${WORKLOAD_NAMESPACE}" apply -f "${pod_spec}" >/dev/null
+  retry 60 1 kubectl -n "${WORKLOAD_NAMESPACE}" get pod "${pod_name}" >/dev/null
+
+  # 5) Find ResourceClaim owned by pod and wait it becomes allocated+reserved
+  local claim
+  claim="$(wait_claim_for_pod "${WORKLOAD_NAMESPACE}" "${pod_name}")"
+  [[ -n "${claim}" ]] || fail "Could not find ResourceClaim owned by pod ${pod_name}"
+
+  wait_claim_allocated_reserved "${WORKLOAD_NAMESPACE}" "${claim}" \
+    || fail "claim did not become allocated+reserved"
+
+  # Read allocationTimestamp to ensure claim status was processed
+  local ts0
+  ts0="$(kubectl -n "${WORKLOAD_NAMESPACE}" get resourceclaim "${claim}" -o jsonpath='{.status.allocation.allocationTimestamp}')"
+  [[ -n "${ts0}" ]] || fail "allocationTimestamp is empty for claim=${claim}"
+
+  # NOW we can read the node chosen by scheduler
+  local node
+  node="$(kubectl -n "${WORKLOAD_NAMESPACE}" get resourceclaim "${claim}" -o jsonpath='{.status.allocation.nodeSelector.nodeSelectorTerms[0].matchFields[0].values[0]}' 2>/dev/null || true)"
+  [[ -n "${node}" ]] || fail "allocated node empty"
+
+  # Controller should label that node with ComputeDomain UID
+  assert_node_label_behavior present "${node}" "resource.nvidia.com/computeDomain" "${domain_id}" 60 2 \
+    || fail "node label did not become resource.nvidia.com/computeDomain=${domain_id}"
+  
+  # 6) We expect pod to be blocked on BindingConditions while DS init is blocking
+  wait_for_pod_event "pod/${pod_name}" "BindingConditionsPending" 120 \
+    || fail "did not observe BindingConditionsPending event for workload pod"
+
+  # 7) Now the controller should mark the claim condition True
+  wait_claim_bc_status_or_fail "${WORKLOAD_NAMESPACE}" "${claim}" "ComputeDomainNotReady" "True" \
+    || fail "ResourceClaim did not get ComputeDomainNotReady=True"
+
+  # 8) Check allocationTimestamp change
+  local ts1
+  for i in $(seq 1 60); do
+    ts1="$(kubectl -n "${WORKLOAD_NAMESPACE}" get resourceclaim "${claim}" -o jsonpath='{.status.allocation.allocationTimestamp}')"
+    if [[ "${ts0}" != "${ts1}" && -n "${ts1}" ]]; then
+      break
+    fi
+    sleep 1
+  done
+  [[ "${ts0}" != "${ts1}" && -n "${ts1}" ]] || fail "ResourceClaim did not rechedule"
+}
