@@ -444,17 +444,6 @@ source:
 EOF
   sleep 5
 
-  # 7) Patch AllocationTimestamp to simulate timeout->retry path
-  local new_ts="2026-02-09T00:00:00Z"
-  kubectl -n "${WORKLOAD_NAMESPACE}" patch resourceclaim "${claim}" \
-  --type='json' \
-  -p="[{
-    \"op\":\"replace\",
-    \"path\":\"/status/allocation/allocationTimestamp\",
-    \"value\":\"${new_ts}\"
-  }]" >/dev/null
-  sleep 2
-
   # 8) Check allocationTimestamp change
   local ts1
   ts1="$(kubectl -n "${WORKLOAD_NAMESPACE}" get resourceclaim "${claim}" -o jsonpath='{.status.allocation.allocationTimestamp}')"
