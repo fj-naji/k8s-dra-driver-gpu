@@ -182,4 +182,5 @@ tests: runner-image
 		tests/bats/test_cd_misc.bats \
 		tests/bats/test_cd_logging.bats \
 		tests/bats/test_cd_failover.bats \
-		tests/bats/test_cd_updowngrade.bats)
+		tests/bats/test_cd_updowngrade.bats \
+		tests/bats/test_cd_bindingconditions.bats)

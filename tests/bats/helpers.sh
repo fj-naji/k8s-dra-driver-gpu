@@ -308,3 +308,298 @@ log() {
   _log_ts_no_newline
   printf "[%6.1fs] $1\n" "$_DUR"
 }
+
+# Simple retry loop
+retry() {
+  # Args : arg1: retries, arg2: wait time in seconds
+  local retries="$1"; local sleep_s="$2"; shift 2
+  local i
+  for i in $(seq 1 "${retries}"); do
+    if "$@" >/dev/null 2>&1; then return 0; fi
+    sleep "${sleep_s}"
+  done
+  return 1
+}
+
+assert_node_label_behavior() {
+  # Usage:
+  #   assert_node_label_behavior <mode> <node_or_empty> <label_key> <value_or_empty> <duration_s> [interval_s]
+  #
+  # Modes:
+  #   - "unchanged": set of node=value lines must not change
+  #   - "present":   must appear (for specific node or any node)
+  #
+  # Examples:
+  #   assert_node_label_behavior unchanged "" "resource.nvidia.com/computeDomain" "" 15 1
+  #   assert_node_label_behavior present   "" "resource.nvidia.com/computeDomain" "" 60 2
+  #   assert_node_label_behavior present   "localhost" "resource.nvidia.com/computeDomain" "${domain_id}" 60 2
+
+  # Internal helper to extract node-label pairs.
+  # Returns a sorted list of "node=value" strings.
+  # If $node is empty, it checks all nodes. 
+  # If $expected is empty, it checks for the existence of the key.
+
+  local mode="$1"
+  local node="${2:-}"
+  local label_key="$3"
+  local expected="${4:-}"
+  local duration_s="${5:-15}"
+  local interval_s="${6:-1}"
+
+  local max_iter i baseline current
+
+  _dump_nodes_label_kv() {
+    kubectl get nodes -o json \
+      | jq -r --arg k "${label_key}" --arg v "${expected}" --arg n "${node}" '
+          [
+            .items[]
+            | select(($n|length)==0 or .metadata.name==$n)
+            | select(.metadata.labels[$k]? != null)
+            | select(($v|length)==0 or .metadata.labels[$k]==$v)
+            | "\(.metadata.name)=\(.metadata.labels[$k])"
+          ] | sort | .[]
+        ' 2>/dev/null || true
+  }
+
+  max_iter=$((duration_s / interval_s))
+  [[ "${max_iter}" -ge 1 ]] || max_iter=1
+
+  case "${mode}" in
+    unchanged)
+      # Validates that no labels are added/removed/changed during the duration.
+      baseline="$(_dump_nodes_label_kv)"
+      for i in $(seq 1 "${max_iter}"); do
+        current="$(_dump_nodes_label_kv)"
+        if [[ "${current}" != "${baseline}" ]]; then
+          echo "Baseline (${label_key}${expected:+=${expected}}${node:+ on node=${node}}):"
+          echo "${baseline}" || true
+          echo "Current (${label_key}${expected:+=${expected}}${node:+ on node=${node}}):"
+          echo "${current}" || true
+          fail "node label set changed: ${label_key}${expected:+=${expected}}${node:+ on ${node}}"
+        fi
+        sleep "${interval_s}"
+      done
+      ;;
+    present)
+      # Polls until at least one node matches the criteria.
+      # Returns 0 immediately on success to save test time.
+      for i in $(seq 1 "${max_iter}"); do
+        current="$(_dump_nodes_label_kv)"
+        if [[ -n "${current}" ]]; then
+          echo "${current}" | head -n1
+          return 0
+        fi
+        sleep "${interval_s}"
+      done
+
+      echo "ERROR: timed out waiting for ${label_key}${expected:+=${expected}}${node:+ on node=${node}}"
+      if [[ -n "${node}" ]]; then
+        kubectl get node "${node}" -o json \
+          | jq -r --arg k "${label_key}" '"\(.metadata.name) \(.metadata.labels[$k] // "")"' 2>/dev/null || true
+      else
+        kubectl get nodes -o json \
+          | jq -r --arg k "${label_key}" '.items[] | "\(.metadata.name) \(.metadata.labels[$k] // "")"' 2>/dev/null || true
+      fi
+      return 1
+      ;;
+    *)
+      fail "assert_node_label_behavior: invalid mode '${mode}'"
+      ;;
+  esac
+}
+
+wait_claim_for_pod() {
+  # Kubernetes DRA: ResourceClaims are often linked to Pods via ownerReferences.
+  # This finds the claim created for a specific Pod instance (UID-based).
+
+  local ns="$1"
+  local pod_name="$2"
+
+  local pod_uid
+  # We use UID instead of name to ensure we don't pick up a stale Claim 
+  # from a previous Pod of the same name.
+  pod_uid="$(kubectl -n "${ns}" get pod "${pod_name}" -o jsonpath='{.metadata.uid}' 2>/dev/null || true)"
+  [[ -n "${pod_uid}" ]] || { echo ""; return 1; }
+
+  local i claim
+  for i in $(seq 1 60); do
+    claim="$(
+      kubectl -n "${ns}" get resourceclaim -o json \
+        | jq -r --arg uid "${pod_uid}" '
+            .items[]
+            | select((.metadata.ownerReferences // []) | any(.uid == $uid))
+            | .metadata.name
+          ' | head -n 1
+    )"
+    if [[ -n "${claim}" && "${claim}" != "null" ]]; then
+      echo "${claim}"
+      return 0
+    fi
+    sleep 1
+  done
+
+  echo ""
+  return 1
+}
+
+wait_claim_allocated_reserved() {
+  local ns="$1"
+  local claim="$2"
+
+  local i
+  for i in $(seq 1 90); do
+    local alloc reserved
+    alloc="$(kubectl -n "${ns}" get resourceclaim "${claim}" -o jsonpath='{.status.allocation.devices.results[0].device}' 2>/dev/null || true)"
+    reserved="$(kubectl -n "${ns}" get resourceclaim "${claim}" -o jsonpath='{.status.reservedFor[0].uid}' 2>/dev/null || true)"
+    if [[ -n "${alloc}" && -n "${reserved}" ]]; then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
+wait_claim_bc_status_or_fail() {
+  # 'bc' stands for BindingCondition. 
+  # This waits for a specific Driver/Controller to signal that a claim is ready 
+  # or has met a specific hardware requirement (e.g., 'ComputeDomainReady=True').
+
+  local ns="$1"
+  local claim="$2"
+  local bc_name="$3"
+  local bc_status="$4"
+
+  local i
+  for i in $(seq 1 180); do
+    if kubectl -n "${ns}" get resourceclaim "${claim}" -o json \
+      | jq -e --arg name "${bc_name}" --arg st "${bc_status}" '
+          any(
+            (.status.devices // [])[].conditions[]?;
+            .type==$name and .status==$st
+          )
+        ' >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 2
+  done
+
+  echo "ERROR: timed out waiting for ${ns}/${claim} condition ${bc_name}=${bc_status}"
+  kubectl -n "${ns}" get resourceclaim "${claim}" -o yaml || true
+  return 1
+}
+
+wait_pod_scheduled_or_fail() {
+  local ns="$1"
+  local pod="$2"
+
+  local i n
+  for i in $(seq 1 90); do
+    n="$(kubectl -n "${ns}" get pod "${pod}" -o jsonpath='{.spec.nodeName}' 2>/dev/null || true)"
+    if [[ -n "${n}" ]]; then
+      return 0
+    fi
+    sleep 2
+  done
+
+  echo "ERROR: pod never got scheduled (spec.nodeName still empty): ${ns}/${pod}"
+  kubectl -n "${ns}" get pod "${pod}" -o yaml || true
+  return 1
+}
+
+wait_ds_pod_running_for_cd() {
+  local cd_uid="$1"
+
+  retry 60 2 bash -c \
+    "kubectl -n \"${DRIVER_NAMESPACE}\" get pod -l resource.nvidia.com/computeDomain=\"${cd_uid}\" --no-headers | grep -q ."
+
+  kubectl -n "${DRIVER_NAMESPACE}" wait \
+    --for=condition=Ready pod \
+    -l resource.nvidia.com/computeDomain="${cd_uid}" \
+    --timeout=180s
+}
+
+patch_resourceclaim_status_from_template() {
+  # Usage:
+  #   patch_resourceclaim_status_from_template <ns> <claim> <template_path> \
+  #     NODE_NAME=... DOMAIN_ID=... POD_NAME=... POD_UID=... \
+  #     ALLOCATION_TIMESTAMP=... OPAQUE_DRIVER=... RESULT_DRIVER=... \
+  #     KIND=... POOL=... DEVICE=...
+  #
+  # Template placeholders are: __NODE_NAME__ __DOMAIN_ID__ __POD_NAME__ __POD_UID__
+  # plus optional __ALLOCATION_TIMESTAMP__ __OPAQUE_DRIVER__ __RESULT_DRIVER__ __KIND__ __POOL__ __DEVICE__.
+
+  local ns="$1"
+  local claim="$2"
+  local tmpl="$3"
+  shift 3
+
+  [[ -f "${tmpl}" ]] || { echo "ERROR: template not found: ${tmpl}"; return 1; }
+
+  local patch
+  patch="$(cat "${tmpl}")"
+
+  local kv key val
+  for kv in "$@"; do
+    key="${kv%%=*}"
+    val="${kv#*=}"
+    patch="${patch//__${key}__/${val}}"
+  done
+
+  # Write to a temp file and validate the JSON before applying
+  local tmp
+  tmp="$(mktemp --suffix=.json)"
+  printf '%s' "${patch}" > "${tmp}"
+
+  if ! jq -e . "${tmp}" >/dev/null 2>&1; then
+    echo "ERROR: rendered patch is not valid JSON:" >&2
+    sed -n '1,200p' "${tmp}" >&2 || true
+    rm -f "${tmp}"
+    return 1
+  fi
+
+  # Patch the ResourceClaim status
+  if ! kubectl -n "${ns}" patch resourceclaim "${claim}" \
+    --type merge \
+    --subresource=status \
+    --patch-file="${tmp}" 2>&1; then
+      echo "ERROR: kubectl patch failed for ${ns}/${claim}" >&2
+      echo "Patch file:" >&2
+      cat "${tmp}" >&2 || true
+      rm -f "${tmp}"
+      return 1
+  fi
+
+  # Remove temp file
+  rm -f "${tmp}"
+}
+
+cleanup_imex_demo() {
+  # -> RC labels:
+  #         - e2e.nvidia.com/suite=cd-bindingconditions-rc
+  # -> Pod labels:
+  #         - e2e.nvidia.com/suite=cd-bindingconditions-pod / e2e.nvidia.com/suite: imex-channel-injection-cd
+  # -> CD labels:
+  #         - e2e.nvidia.com/suite=cd-bindingconditions-cd / e2e.nvidia.com/suite: imex-channel-injection-cd
+
+  # Delete any test ResourceClaims created by the test across all NS (by label => e2e.nvidia.com/suite=cd-bindingconditions-rc)
+  kubectl delete resourceclaim -A  -l e2e.nvidia.com/suite=cd-bindingconditions-rc --ignore-not-found --wait=false >/dev/null 2>&1 || true
+
+  # Delete any test pods created by the test across all NS (by label => e2e.nvidia.com/suite=cd-bindingconditions-pod/imex-channel-injection-pod)
+  kubectl delete pod -A  -l e2e.nvidia.com/suite=cd-bindingconditions-pod --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  kubectl delete pod -A  -l e2e.nvidia.com/suite=imex-channel-injection-pod --ignore-not-found --wait=false >/dev/null 2>&1 || true
+
+  # Delete any test ComputeDomains created by the test across all NS (by label => e2e.nvidia.com/suite=cd-bindingconditions-cd/imex-channel-injection-cd)
+  kubectl delete computedomains -A  -l e2e.nvidia.com/suite=cd-bindingconditions-cd --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  kubectl delete computedomains -A  -l e2e.nvidia.com/suite=imex-channel-injection-cd --ignore-not-found --wait=false >/dev/null 2>&1 || true
+
+
+  # Clean nodes labels that may have been left behind
+  kubectl label nodes --all resource.nvidia.com/computeDomain- >/dev/null 2>&1 || true
+
+  # For safety, wait for specific known objects to be deleted
+  kubectl wait --for=delete pod -A -l 'e2e.nvidia.com/suite=imex-channel-injection-pod' --timeout=60s
+  kubectl wait --for=delete resourceclaim -A -l 'e2e.nvidia.com/suite=cd-bindingconditions-rc' --timeout=90s
+  kubectl wait --for=delete computedomains -A -l 'e2e.nvidia.com/suite=cd-bindingconditions-cd' --timeout=60s
+  
+  return 0
+}

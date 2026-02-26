@@ -1,0 +1,11 @@
+apiVersion: resource.nvidia.com/v1beta1
+kind: ComputeDomain
+metadata:
+  name: cd-bindingconditions-test
+  labels:
+    e2e.nvidia.com/suite: cd-bindingconditions-cd
+spec:
+  numNodes: 1
+  channel:
+    resourceClaimTemplate:
+      name: cd-channel-0

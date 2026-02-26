@@ -1,0 +1,14 @@
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  name: cd-bindingconditions-rc-test
+  labels:
+    e2e.nvidia.com/suite: cd-bindingconditions-rc
+spec:
+  devices:
+    requests:
+    - name: channel
+      exactly:
+        allocationMode: ExactCount
+        count: 1
+        deviceClassName: compute-domain-default-channel.nvidia.com
